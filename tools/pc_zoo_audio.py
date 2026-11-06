@@ -125,7 +125,11 @@ def exists(pc_data, rel):
     return False
 
 
-def build(xbox_data, pc_data, out_dir, radvideo):
+def build(xbox_data, pc_data, out_dir, radvideo=None):
+    """radvideo None: everything as 16-bit PCM .wav, no RAD Video Tools.
+    The game then needs " bink" off those GLOBAL.SND lines (it plays a
+    line's sound from .bik with the flag, from .wav without). Returns the
+    GLOBAL.SND paths written as .wav although declared bink."""
     xsnd = os.path.join(xbox_data, 'xboxsound', 'ENGLISH')
     snd = sound_list(pc_data)
     jobs = {}                                    # rel path -> (kind, ch, rate, frames source)
@@ -136,12 +140,19 @@ def build(xbox_data, pc_data, out_dir, radvideo):
     for nm, line in STREAMS.items():
         entry = snd.get(nm) or (line.split()[0], line.split()[1:])
         jobs[nm] = (entry,) + xss(os.path.join(xsnd, nm + '.xss'))
-    made = []
+    made, unbinked = [], []
     for nm, ((path, flags), tag, ch, rate, data) in sorted(jobs.items()):
-        bink = 'bink' in flags
+        bink = 'bink' in flags and radvideo is not None
         rel = path.replace(BS, os.sep) + ('.bik' if bink else '.wav')
-        if exists(pc_data, rel):
+        base = path.replace(BS, os.sep)
+        # the PC has this sound already: keep its own. A line declared bink
+        # is satisfied by either form (we only change it to .wav when we make
+        # one); a .wav line only by a .wav (the retail SPIDEY\ENGLISH\
+        # SPBREATH.bik is never played: its line has no bink flag).
+        if exists(pc_data, base + '.wav') or ('bink' in flags and exists(pc_data, base + '.bik')):
             continue
+        if 'bink' in flags and not bink:
+            unbinked.append(path)
         d, n = os.path.split(rel)
         if 'voice' in flags and d.lower().startswith(os.path.join('audio', 'characters')):
             d = os.path.join(d, 'ENGLISH')
@@ -155,6 +166,7 @@ def build(xbox_data, pc_data, out_dir, radvideo):
         made.append(os.path.relpath(dst, out_dir))
         print('%-48s %d ch %5d Hz %6.1f s' % (made[-1], ch, rate, len(frames) / 2 / ch / rate))
     print(len(made), 'files')
+    return unbinked
 
 
 if __name__ == '__main__':

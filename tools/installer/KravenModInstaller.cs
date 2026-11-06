@@ -21,6 +21,15 @@
 // It does not touch the community fix files (d3d8.dll, dxwrapper, Xidi...).
 //
 // Usage: KravenModInstaller.exe [install|uninstall] ["game folder"]
+//
+// Builder edition (KravenModBuilder.exe, build_builder.py): carries no game
+// content, only an embeddable Python ("builder/python.zip") and the mod's
+// tools ("builder/tools/*.py"). It asks for the user's own Xbox disc image,
+// runs tools/make_mod.py in a temp folder (levels built against this very PC
+// copy, sounds as .wav), then installs those files exactly as above. Its
+// GLOBAL.SND edit also drops " bink" from the lines whose sound it made as
+// .wav (make_mod's unbink.txt), and switches the zoo dialogue on as .wav.
+//   KravenModBuilder.exe [install|uninstall] ["game folder"] ["disc image"]
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -32,14 +41,61 @@ using System.Text.RegularExpressions;
 static class KravenModInstaller
 {
     const string ModDir = "KravenMod";
-    static string game, backup, logPath;
+    static string game, backup, logPath, iso, stage;
     static List<string> log = new List<string>();
+    static readonly bool builder = Assembly.GetExecutingAssembly().GetManifestResourceInfo("builder/python.zip") != null;
 
+#if GUI
+    // Window version (KravenModBuilder.exe is built with /define:GUI): pick
+    // or drop the game folder and the disc image, then Install / Uninstall.
+    [STAThread]
     static int Main(string[] args)
     {
-        Console.Title = "Kraven mod installer - Spider-Man (2002)";
+        System.Windows.Forms.Application.EnableVisualStyles();
+        System.Windows.Forms.Application.Run(new Window(args));
+        return 0;
+    }
+#else
+    static int Main(string[] args)
+    {
+        return ConsoleMain(args);
+    }
+#endif
+
+    // After game (and, for the builder, iso) are set: do it.
+    static void Execute(string action)
+    {
+        backup = Path.Combine(game, ModDir, "backup");
+        logPath = Path.Combine(game, ModDir, "install.log");
+        bool installed = File.Exists(logPath);
+        if (GameRunning())
+            throw new Exception("Spider-Man is running from this folder. Close the game first.");
+        try
+        {
+            if (action == "uninstall") Uninstall();
+            else
+            {
+                if (builder && (iso == null || !IsXboxImage(iso))) throw new Exception("No Xbox disc image of Spider-Man.");
+                if (installed) Uninstall();
+                if (builder) Build();
+                Install();
+            }
+        }
+        finally
+        {
+            if (stage != null)
+                try { Directory.Delete(stage, true); } catch (Exception) { }
+            stage = null;
+        }
+    }
+
+    static int ConsoleMain(string[] args)
+    {
+        Console.Title = builder ? "Kraven mod builder - Spider-Man (2002)" : "Kraven mod installer - Spider-Man (2002)";
         Console.WriteLine("Kraven mod for Spider-Man: The Movie (2002, Windows)");
         Console.WriteLine("Adds the Bronx Zoo levels: Kraven's Test, The Mighty Hunter.");
+        if (builder)
+            Console.WriteLine("Builds them from your own Xbox disc image of Spider-Man; no game files are included.");
         Console.WriteLine();
         string action = null;
         foreach (string a in args)
@@ -47,6 +103,7 @@ static class KravenModInstaller
             string l = a.ToLowerInvariant().TrimStart('-', '/');
             if (l == "install" || l == "uninstall") action = l;
             else if (Directory.Exists(a)) game = Path.GetFullPath(a);
+            else if (File.Exists(a)) iso = Path.GetFullPath(a);
         }
         try
         {
@@ -73,14 +130,8 @@ static class KravenModInstaller
                 else if (k == "u") action = "uninstall";
                 else return 0;
             }
-            if (GameRunning())
-                return Fail("Spider-Man is running from this folder. Close the game first.");
-            if (action == "uninstall") Uninstall();
-            else
-            {
-                if (installed) Uninstall();
-                Install();
-            }
+            if (action != "uninstall" && builder && (iso = AskIso()) == null) return Fail("No Xbox disc image of Spider-Man.");
+            Execute(action);
         }
         catch (Exception e)
         {
@@ -88,6 +139,330 @@ static class KravenModInstaller
         }
         Pause();
         return 0;
+    }
+
+#if GUI
+    class Window : System.Windows.Forms.Form
+    {
+        readonly System.Windows.Forms.TextBox gameBox = new System.Windows.Forms.TextBox(), isoBox = new System.Windows.Forms.TextBox();
+        readonly System.Windows.Forms.Label gameNote = new System.Windows.Forms.Label(), isoNote = new System.Windows.Forms.Label();
+        readonly System.Windows.Forms.Button install = new System.Windows.Forms.Button(), uninstall = new System.Windows.Forms.Button();
+        readonly System.Windows.Forms.TextBox output = new System.Windows.Forms.TextBox();
+
+        public Window(string[] args)
+        {
+            Text = "Kraven mod for Spider-Man (2002)";
+            Font = new System.Drawing.Font("Segoe UI", 9.5f);
+            ClientSize = new System.Drawing.Size(640, 500);
+            MinimumSize = new System.Drawing.Size(520, 420);
+            StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
+            AllowDrop = true;
+            var t = new System.Windows.Forms.TableLayoutPanel { Dock = System.Windows.Forms.DockStyle.Fill, Padding = new System.Windows.Forms.Padding(12), ColumnCount = 2 };
+            t.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100));
+            t.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize));
+            Controls.Add(t);
+            var intro = new System.Windows.Forms.Label
+            {
+                AutoSize = true, MaximumSize = new System.Drawing.Size(600, 0), Margin = new System.Windows.Forms.Padding(0, 0, 0, 10),
+                Text = "Adds the Bronx Zoo levels (Kraven's Test, The Mighty Hunter) to the Windows game. " +
+                       (builder ? "They are built from your own Xbox disc image; no game files come with this program. " : "") +
+                       "Browse for each item, or drag it onto this window."
+            };
+            t.Controls.Add(intro, 0, 0); t.SetColumnSpan(intro, 2);
+            Row(t, 1, "Windows game folder (the one with SpiderMan.exe)", gameBox, gameNote, BrowseGame);
+            if (builder) Row(t, 4, "Xbox disc image of Spider-Man (.iso / .xiso)", isoBox, isoNote, BrowseIso);
+            var buttons = new System.Windows.Forms.FlowLayoutPanel { AutoSize = true, Margin = new System.Windows.Forms.Padding(0, 8, 0, 8) };
+            install.Text = "Install"; install.AutoSize = true; install.Click += delegate { Go("install"); };
+            uninstall.Text = "Uninstall"; uninstall.AutoSize = true; uninstall.Click += delegate { Go("uninstall"); };
+            buttons.Controls.Add(install); buttons.Controls.Add(uninstall);
+            t.Controls.Add(buttons, 0, 7); t.SetColumnSpan(buttons, 2);
+            output.Multiline = true; output.ReadOnly = true; output.ScrollBars = System.Windows.Forms.ScrollBars.Vertical;
+            output.Dock = System.Windows.Forms.DockStyle.Fill; output.Font = new System.Drawing.Font("Consolas", 9f);
+            t.RowStyles.Clear();
+            for (int i = 0; i < 8; i++) t.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize));
+            t.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100));
+            t.Controls.Add(output, 0, 8); t.SetColumnSpan(output, 2);
+
+            DragEnter += (s, e) => { if (e.Data.GetDataPresent(System.Windows.Forms.DataFormats.FileDrop)) e.Effect = System.Windows.Forms.DragDropEffects.Copy; };
+            DragDrop += (s, e) => { foreach (string p in (string[])e.Data.GetData(System.Windows.Forms.DataFormats.FileDrop)) Take(p); };
+            gameBox.TextChanged += delegate { Check(); };
+            isoBox.TextChanged += delegate { Check(); };
+            Console.SetOut(new BoxWriter(output));
+
+            string autoAction = null;
+            bool auto = false;
+            foreach (string a in args)
+            {
+                if (a == "--auto") auto = true;
+                else if (a == "install" || a == "uninstall") autoAction = a;
+                else Take(a);
+            }
+            if (gameBox.Text.Length == 0) { string g = FindGame(); if (g != null) gameBox.Text = g; }
+            if (builder && isoBox.Text.Length == 0) foreach (string f in FoundImages()) { isoBox.Text = f; break; }
+            Check();
+            if (auto && autoAction != null) Shown += delegate { Go(autoAction); };
+        }
+
+        // The window runs as the user (an elevated window takes no drops from
+        // Explorer); it reopens itself elevated only when the folder needs it.
+        static bool IsAdmin()
+        {
+            return new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent())
+                .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+        }
+
+        static bool CanWrite(string dir)
+        {
+            try
+            {
+                string p = Path.Combine(dir, ".kravenmod_write_test");
+                File.WriteAllText(p, "");
+                File.Delete(p);
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        bool Elevate(string action)
+        {
+            if (IsAdmin() || (CanWrite(game) && CanWrite(Path.Combine(game, "data")))) return false;
+            string a = string.Format("--auto {0} \"{1}\"", action, game) + (builder ? string.Format(" \"{0}\"", iso) : "");
+            try
+            {
+                Process.Start(new ProcessStartInfo(Assembly.GetExecutingAssembly().Location, a) { Verb = "runas", UseShellExecute = true });
+                Close();
+            }
+            catch (Exception)
+            {
+                System.Windows.Forms.MessageBox.Show(this, "Administrator rights are needed to change that folder.", Text);
+            }
+            return true;
+        }
+
+        void Row(System.Windows.Forms.TableLayoutPanel t, int row, string label, System.Windows.Forms.TextBox box,
+                 System.Windows.Forms.Label note, EventHandler browse)
+        {
+            var l = new System.Windows.Forms.Label { Text = label, AutoSize = true, Margin = new System.Windows.Forms.Padding(0, 6, 0, 2) };
+            t.Controls.Add(l, 0, row); t.SetColumnSpan(l, 2);
+            box.Dock = System.Windows.Forms.DockStyle.Fill; box.AllowDrop = true;
+            box.DragEnter += (s, e) => { if (e.Data.GetDataPresent(System.Windows.Forms.DataFormats.FileDrop)) e.Effect = System.Windows.Forms.DragDropEffects.Copy; };
+            box.DragDrop += (s, e) => { foreach (string p in (string[])e.Data.GetData(System.Windows.Forms.DataFormats.FileDrop)) Take(p); };
+            t.Controls.Add(box, 0, row + 1);
+            var b = new System.Windows.Forms.Button { Text = "Browse...", AutoSize = true };
+            b.Click += browse;
+            t.Controls.Add(b, 1, row + 1);
+            note.AutoSize = true; note.Margin = new System.Windows.Forms.Padding(0, 0, 0, 4);
+            t.Controls.Add(note, 0, row + 2); t.SetColumnSpan(note, 2);
+        }
+
+        // a dropped / given path: a folder or SpiderMan.exe -> game; an image -> iso
+        void Take(string p)
+        {
+            if (Directory.Exists(p)) gameBox.Text = p;
+            else if (File.Exists(p) && Path.GetFileName(p).Equals("SpiderMan.exe", StringComparison.OrdinalIgnoreCase)) gameBox.Text = Path.GetDirectoryName(p);
+            else if (File.Exists(p) && builder) isoBox.Text = p;
+        }
+
+        void BrowseGame(object s, EventArgs e)
+        {
+            using (var d = new System.Windows.Forms.OpenFileDialog { Title = "Find SpiderMan.exe in the game folder", Filter = "SpiderMan.exe|SpiderMan.exe|Programs (*.exe)|*.exe" })
+                if (d.ShowDialog(this) == System.Windows.Forms.DialogResult.OK) Take(d.FileName);
+        }
+
+        void BrowseIso(object s, EventArgs e)
+        {
+            using (var d = new System.Windows.Forms.OpenFileDialog { Title = "Xbox disc image of Spider-Man", Filter = "Disc images (*.iso;*.xiso)|*.iso;*.xiso|All files (*.*)|*.*" })
+                if (d.ShowDialog(this) == System.Windows.Forms.DialogResult.OK) Take(d.FileName);
+        }
+
+        bool GameOk() { string g = gameBox.Text.Trim(); return File.Exists(Path.Combine(g, "SpiderMan.exe")) && File.Exists(Path.Combine(g, @"data\COMMON.pkg")); }
+
+        void Check()
+        {
+            bool g = GameOk();
+            bool installed = g && File.Exists(Path.Combine(gameBox.Text.Trim(), ModDir, "install.log"));
+            gameNote.Text = gameBox.Text.Trim().Length == 0 ? "" : !g ? "Not a Spider-Man (2002) Windows game folder." : installed ? "OK - the Kraven mod is installed here." : "OK";
+            gameNote.ForeColor = g ? System.Drawing.Color.DarkGreen : System.Drawing.Color.Firebrick;
+            bool i = !builder || IsXboxImage(isoBox.Text.Trim());
+            if (builder)
+            {
+                isoNote.Text = isoBox.Text.Trim().Length == 0 ? "" : i ? "OK - an Xbox disc image" : "Not an Xbox disc image.";
+                isoNote.ForeColor = i ? System.Drawing.Color.DarkGreen : System.Drawing.Color.Firebrick;
+            }
+            install.Text = installed ? "Reinstall" : "Install";
+            install.Enabled = g && i;
+            uninstall.Enabled = installed;
+        }
+
+        void Go(string action)
+        {
+            game = Path.GetFullPath(gameBox.Text.Trim());
+            iso = builder ? Path.GetFullPath(isoBox.Text.Trim()) : null;
+            if (Elevate(action)) return;
+            install.Enabled = uninstall.Enabled = false;
+            output.Clear();
+            Console.WriteLine("Game folder: " + game);
+            var th = new System.Threading.Thread(delegate ()
+            {
+                string err = null;
+                try { Execute(action); }
+                catch (Exception ex) { err = ex.Message; }
+                BeginInvoke((Action)delegate
+                {
+                    if (err != null)
+                    {
+                        Console.WriteLine();
+                        Console.WriteLine("ERROR: " + err);
+                        System.Windows.Forms.MessageBox.Show(this, err, Text, System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
+                    }
+                    else
+                        System.Windows.Forms.MessageBox.Show(this, action == "uninstall" ? "The Kraven mod was removed." : "The Kraven mod is installed.", Text);
+                    Check();
+                });
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+    }
+
+    // Console output into the window's text box, from any thread
+    class BoxWriter : TextWriter
+    {
+        readonly System.Windows.Forms.TextBox box;
+        public BoxWriter(System.Windows.Forms.TextBox b) { box = b; }
+        public override Encoding Encoding { get { return Encoding.UTF8; } }
+        public override void Write(char c) { Write(c.ToString()); }
+        public override void Write(string s)
+        {
+            if (s == null) return;
+            s = s.Replace("\r\n", "\n").Replace("\n", "\r\n");
+            if (box.InvokeRequired) box.BeginInvoke((Action)delegate { box.AppendText(s); });
+            else box.AppendText(s);
+        }
+        public override void WriteLine(string s) { Write(s + "\n"); }
+        public override void WriteLine() { Write("\n"); }
+    }
+#endif
+
+    static List<string> FoundImages()
+    {
+        var found = new List<string>();
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        foreach (string d in new[] { Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), Path.Combine(home, "Desktop"),
+                                     Path.Combine(home, "Downloads"), Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments) })
+        {
+            if (!Directory.Exists(d)) continue;
+            foreach (string f in Directory.GetFiles(d, "*.iso"))
+                if (!found.Contains(f) && Path.GetFileName(f).IndexOf("spider", StringComparison.OrdinalIgnoreCase) >= 0 && IsXboxImage(f))
+                    found.Add(f);
+        }
+        return found;
+    }
+
+    // ---------------------------------------------------------------- builder
+
+    static readonly string[] OffsetsXdvdfs = { "0", "18300000", "FD90000", "2080000" };
+
+    static bool IsXboxImage(string path)
+    {
+        try
+        {
+            using (var f = File.OpenRead(path))
+                foreach (string o in OffsetsXdvdfs)
+                {
+                    long at = Convert.ToInt64(o, 16) + 32 * 2048;
+                    if (at + 20 > f.Length) continue;
+                    f.Seek(at, SeekOrigin.Begin);
+                    byte[] h = new byte[20];
+                    f.Read(h, 0, 20);
+                    if (Encoding.ASCII.GetString(h) == "MICROSOFT*XBOX*MEDIA") return true;
+                }
+        }
+        catch (Exception) { }
+        return false;
+    }
+
+    static string AskIso()
+    {
+        if (iso != null)
+        {
+            if (IsXboxImage(iso)) return iso;
+            Console.WriteLine("  " + iso + " is not an Xbox disc image.");
+        }
+        // offer images found in the usual places
+        var found = new List<string>();
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        foreach (string d in new[] { Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), Path.Combine(home, "Desktop"),
+                                     Path.Combine(home, "Downloads"), Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments) })
+        {
+            if (!Directory.Exists(d)) continue;
+            foreach (string f in Directory.GetFiles(d, "*.iso"))
+                if (!found.Contains(f) && Path.GetFileName(f).IndexOf("spider", StringComparison.OrdinalIgnoreCase) >= 0 && IsXboxImage(f))
+                    found.Add(f);
+        }
+        Console.WriteLine();
+        Console.WriteLine("The mod is built from your own Xbox disc image of Spider-Man (an .iso / .xiso).");
+        for (int i = 0; i < found.Count; i++)
+            Console.WriteLine(string.Format("  [{0}] {1}", i + 1, found[i]));
+        Console.Write(found.Count > 0 ? "Pick a number, or type the image's path: " : "Type the image's path: ");
+        string t = (Console.ReadLine() ?? "").Trim().Trim('"');
+        int k;
+        if (int.TryParse(t, out k) && k >= 1 && k <= found.Count) return found[k - 1];
+        if (File.Exists(t) && IsXboxImage(t)) return Path.GetFullPath(t);
+        if (File.Exists(t)) Console.WriteLine("  That file is not an Xbox disc image.");
+        return null;
+    }
+
+    static void Build()
+    {
+        Console.WriteLine();
+        Console.WriteLine("Building the mod from " + iso + " ...");
+        stage = Path.Combine(Path.GetTempPath(), "KravenModBuild_" + Guid.NewGuid().ToString("N").Substring(0, 8));
+        string py = Path.Combine(stage, "python"), tools = Path.Combine(stage, "tools");
+        Directory.CreateDirectory(py);
+        Directory.CreateDirectory(tools);
+        string zip = Path.Combine(stage, "python.zip");
+        using (Stream s = Assembly.GetExecutingAssembly().GetManifestResourceStream("builder/python.zip"))
+        using (FileStream f = File.Create(zip))
+            s.CopyTo(f);
+        UnzipTo(zip, py);
+        foreach (string n in Assembly.GetExecutingAssembly().GetManifestResourceNames())
+            if (n.StartsWith("builder/tools/"))
+                using (Stream s = Assembly.GetExecutingAssembly().GetManifestResourceStream(n))
+                using (FileStream f = File.Create(Path.Combine(tools, n.Substring("builder/tools/".Length))))
+                    s.CopyTo(f);
+        var psi = new ProcessStartInfo(Path.Combine(py, "python.exe"),
+            string.Format("-u \"{0}\" \"{1}\" \"{2}\" \"{3}\"", Path.Combine(tools, "make_mod.py"), iso, game, Path.Combine(stage, "out")));
+        psi.UseShellExecute = false;
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+        psi.WorkingDirectory = stage;
+        var tail = new List<string>();
+        using (Process p = Process.Start(psi))
+        {
+            p.ErrorDataReceived += (o, e) => { if (e.Data != null) lock (tail) tail.Add(e.Data); };
+            p.BeginErrorReadLine();
+            string line;
+            while ((line = p.StandardOutput.ReadLine()) != null)
+            {
+                if (line.StartsWith(">> ")) Console.WriteLine("  " + line.Substring(3));
+                lock (tail) { tail.Add(line); if (tail.Count > 40) tail.RemoveAt(0); }
+            }
+            p.WaitForExit();
+            if (p.ExitCode != 0)
+            {
+                Console.WriteLine();
+                lock (tail) foreach (string l in tail) Console.WriteLine("    " + l);
+                throw new Exception("building the mod failed (details above).");
+            }
+        }
+    }
+
+    static void UnzipTo(string zip, string dir)
+    {
+        // needs /r:System.IO.Compression.FileSystem.dll /r:System.IO.Compression.dll (build_builder.py)
+        System.IO.Compression.ZipFile.ExtractToDirectory(zip, dir);
+        if (!File.Exists(Path.Combine(dir, "python.exe"))) throw new Exception("could not unpack the bundled Python.");
     }
 
     static bool GameRunning()
@@ -161,6 +536,7 @@ static class KravenModInstaller
         Console.WriteLine();
         Console.WriteLine("Installing...");
         CheckGame();
+        if (!builder) ChooseVariant();
         Directory.CreateDirectory(backup);
         log.Clear();
         try
@@ -191,20 +567,128 @@ static class KravenModInstaller
         }
     }
 
-    static IEnumerable<string> PayloadNames()
+    // The level packages come in one version per game build ("variants"):
+    // they carry that build's own pause/results/game-over menu code (see
+    // pc_menus.py), so they must match the build's level scripts. Resource
+    // "variants.txt" lists: name, MD5 of that build's M6OSCORP\OSCORP_B.SX
+    // (the menu source), VA of its physics hook. Variant files are
+    // "variant/<name>/<path>"; shared files "payload/<path>".
+    static string variant;
+
+    static void ChooseVariant()
     {
+        var rows = new List<string[]>();
+        using (var r = new StreamReader(Assembly.GetExecutingAssembly().GetManifestResourceStream("variants.txt")))
+        {
+            string line;
+            while ((line = r.ReadLine()) != null)
+                if (line.Trim().Length > 0) rows.Add(line.Split('\t'));
+        }
+        string sx = null;
+        byte[] script = ReadPkgEntry(Path.Combine(game, @"data\levels\OSCORP_B.pkg"), @"M6OSCORP\", "OSCORP_B.SX");
+        if (script != null) sx = Md5(script);
+        uint hook = HookVa(File.ReadAllBytes(Path.Combine(game, "SpiderMan.exe")));
+        foreach (string[] v in rows)
+            if (sx != null && v[1] == sx) { variant = v[0]; Console.WriteLine("  game build: " + v[0] + " (matched by its level scripts)"); return; }
+        foreach (string[] v in rows)
+            if (hook != 0 && Convert.ToUInt32(v[2], 16) == hook) { variant = v[0]; Console.WriteLine("  game build: " + v[0] + " (matched by its exe)"); return; }
+        variant = rows[0][0];
+        Console.WriteLine("  warning: this game build is not one the mod was made for; using the " + variant + " levels.");
+        Console.WriteLine("    The levels should load; if a menu misbehaves, that is the likely cause.");
+    }
+
+    // (source, path in the game folder); a source is a resource name, or
+    // "file:" + a path (the builder's freshly made files)
+    static IEnumerable<KeyValuePair<string, string>> Payload()
+    {
+        if (builder)
+        {
+            string files = Path.Combine(stage, "out", "files") + Path.DirectorySeparatorChar;
+            foreach (string f in Directory.GetFiles(files, "*", SearchOption.AllDirectories))
+                yield return new KeyValuePair<string, string>("file:" + f, f.Substring(files.Length));
+            yield break;
+        }
+        string mine = "variant/" + variant + "/";
         foreach (string n in Assembly.GetExecutingAssembly().GetManifestResourceNames())
-            if (n.StartsWith("payload/")) yield return n;
+        {
+            if (n.StartsWith("payload/")) yield return new KeyValuePair<string, string>(n, n.Substring(8));
+            else if (n.StartsWith(mine)) yield return new KeyValuePair<string, string>(n, n.Substring(mine.Length));
+        }
+    }
+
+    static string Md5(byte[] b)
+    {
+        using (var m = System.Security.Cryptography.MD5.Create())
+            return BitConverter.ToString(m.ComputeHash(b)).Replace("-", "").ToLowerInvariant();
+    }
+
+    static byte[] ReadPkgEntry(string path, string dir, string name)
+    {
+        if (!File.Exists(path)) return null;
+        byte[] d = File.ReadAllBytes(path);
+        uint ndir = BitConverter.ToUInt32(d, 0), nfile = BitConverter.ToUInt32(d, 4), dsize = BitConverter.ToUInt32(d, 8);
+        int at = 12;
+        var inDir = new HashSet<uint>();
+        for (int i = 0; i < ndir; i++)
+        {
+            string dn = CStr(d, at, 0x40);
+            uint n = BitConverter.ToUInt32(d, at + 0x40);
+            at += 0x44;
+            for (int k = 0; k < n; k++)
+                if (dn.Equals(dir, StringComparison.OrdinalIgnoreCase)) inDir.Add(BitConverter.ToUInt32(d, at + 4 * k));
+            at += 4 * (int)n;
+        }
+        long dataBase = d.LongLength - dsize;
+        for (int i = 0; i < nfile; i++)
+        {
+            int r = at + 0x30 * i;
+            if (!inDir.Contains((uint)i) || !CStr(d, r, 0x28).Equals(name, StringComparison.OrdinalIgnoreCase)) continue;
+            uint size = BitConverter.ToUInt32(d, r + 0x28), off = BitConverter.ToUInt32(d, r + 0x2C);
+            byte[] o = new byte[size];
+            Array.Copy(d, dataBase + off, o, 0, size);
+            return o;
+        }
+        return null;
+    }
+
+    // VA of the physics hook, patched or not; 0 if not found
+    static uint HookVa(byte[] d)
+    {
+        int pe = BitConverter.ToInt32(d, 0x3C);
+        uint imageBase = BitConverter.ToUInt32(d, pe + 0x34);
+        int nsec = BitConverter.ToUInt16(d, pe + 6), optSize = BitConverter.ToUInt16(d, pe + 20);
+        for (int i = 0; i < nsec; i++)
+        {
+            int s = pe + 24 + optSize + 40 * i;
+            if ((BitConverter.ToUInt32(d, s + 36) & 0x20000000) == 0) continue;
+            uint textVa = BitConverter.ToUInt32(d, s + 12);
+            int textLen = BitConverter.ToInt32(d, s + 16), textOff = BitConverter.ToInt32(d, s + 20);
+            int[] tail = Tail(Sig, 6);
+            for (int o = textOff; o + Sig.Length <= textOff + textLen; o++)
+                if (Match(d, o + 6, tail) && (Match(d, o, Sig) || d[o] == 0xE9))
+                    return imageBase + textVa + (uint)(o - textOff);
+            return 0;
+        }
+        return 0;
     }
 
     static void CopyPayload()
     {
         int added = 0, replaced = 0;
-        foreach (string res in PayloadNames())
+        foreach (var p in Payload())
         {
-            string rel = res.Substring("payload/".Length).Replace('/', '\\');
+            string res = p.Key;
+            string rel = p.Value.Replace('/', '\\');
             string dst = Path.Combine(game, rel);
             Directory.CreateDirectory(Path.GetDirectoryName(dst));
+            if (File.Exists(dst) && SameAsResource(dst, res))
+            {
+                // already the mod's own file (an earlier or manual install):
+                // nothing to back up, and uninstall removes it
+                log.Add("ADD\t" + rel);
+                added++;
+                continue;
+            }
             if (File.Exists(dst))
             {
                 Backup(rel);
@@ -216,11 +700,41 @@ static class KravenModInstaller
                 log.Add("ADD\t" + rel);
                 added++;
             }
-            using (Stream s = Assembly.GetExecutingAssembly().GetManifestResourceStream(res))
+            using (Stream s = OpenSource(res))
             using (FileStream f = File.Create(dst))
                 s.CopyTo(f);
         }
         Console.WriteLine(string.Format("  files: {0} added, {1} replaced (originals backed up)", added, replaced));
+    }
+
+    static Stream OpenSource(string res)
+    {
+        return res.StartsWith("file:") ? (Stream)File.OpenRead(res.Substring(5))
+                                       : Assembly.GetExecutingAssembly().GetManifestResourceStream(res);
+    }
+
+    static bool SameAsResource(string path, string res)
+    {
+        using (Stream a = OpenSource(res))
+        using (FileStream b = File.OpenRead(path))
+        {
+            if (a.Length != b.Length) return false;
+            byte[] x = new byte[1 << 16], y = new byte[1 << 16];
+            while (true)
+            {
+                int n = a.Read(x, 0, x.Length);
+                if (n == 0) return true;
+                int m = 0;
+                while (m < n)
+                {
+                    int k = b.Read(y, m, n - m);
+                    if (k == 0) return false;
+                    m += k;
+                }
+                for (int i = 0; i < n; i++)
+                    if (x[i] != y[i]) return false;
+            }
+        }
     }
 
     static void Backup(string rel)
@@ -265,13 +779,25 @@ static class KravenModInstaller
         if (text.IndexOf(@"characters\kraven", StringComparison.OrdinalIgnoreCase) < 0)
             Console.WriteLine(@"  warning: GLOBAL.SND declares no Kraven voice lines; Kraven may be silent.");
         int changed = 0;
+        // prebuilt installer: the zoo dialogue ships as Bink; builder: as .wav
         string nt = ZooLine.Replace(text, delegate (Match m)
         {
-            string want = m.Groups[1].Value + " bink";
+            string want = m.Groups[1].Value + (builder ? "" : " bink");
             if (m.Value == want) return m.Value;
             changed++;
             return want;
         });
+        if (builder)
+        {
+            // every sound the builder made as .wav although declared bink
+            foreach (string p in File.ReadAllLines(Path.Combine(stage, "out", "unbink.txt"), Encoding.GetEncoding(1252)))
+            {
+                if (p.Trim().Length == 0) continue;
+                var line = new Regex(@"^(" + Regex.Escape(p.Trim()) + @"[ \t][^\r\n]*?)[ \t]+bink[ \t]*(?=\r?$)",
+                                     RegexOptions.IgnoreCase | RegexOptions.Multiline);
+                nt = line.Replace(nt, delegate (Match m) { changed++; return m.Groups[1].Value; });
+            }
+        }
         if (changed == 0)
         {
             Console.WriteLine("  COMMON.pkg: zoo dialogue already switched on");
@@ -301,7 +827,9 @@ static class KravenModInstaller
             f.Write(BitConverter.GetBytes(newOff + (uint)add.Length), 0, 4);
         }
         log.Add("PATCH\t" + rel);
-        Console.WriteLine(string.Format("  COMMON.pkg: {0} zoo dialogue lines switched on", changed));
+        Console.WriteLine(builder
+            ? string.Format("  COMMON.pkg: {0} sound lines pointed at the new .wav files (zoo dialogue switched on)", changed)
+            : string.Format("  COMMON.pkg: {0} zoo dialogue lines switched on", changed));
     }
 
     // SpiderMan.exe: FUN_004C5060 (the per-entity physics step) rebuilds the

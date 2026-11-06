@@ -252,8 +252,14 @@ def trace_hit(process, tid, address, record):
 def main():
     import os
     os.environ['_NO_DEBUG_HEAP'] = '1'      # no 0xBAADF00D fills that change behaviour
-    game = Path('C:/Program Files (x86)/Activision/Spider-Man (tm) Movie/SpiderMan.exe')
+    import sys
+    game = Path(sys.argv[1]) if len(sys.argv) > 1 else Path('C:/Program Files (x86)/Activision/Spider-Man (tm) Movie/SpiderMan.exe')
     logfile = Path(__file__).resolve().parent.parent / 'build_pc_zoo' / 'kraven_diagnostic.log'
+    if len(sys.argv) > 1:
+        # TRACE holds addresses in the 2002 retail exe; in another build they
+        # land mid-instruction. Log crashes and debug output only.
+        TRACE.clear()
+        logfile = logfile.with_name('kraven_diagnostic_' + game.parent.name.replace(' ', '_') + '.log')
     si, pi = Startup(), ProcessInfo()
     si.cb = C.sizeof(si)
     command = C.create_unicode_buffer('"' + str(game) + '"')

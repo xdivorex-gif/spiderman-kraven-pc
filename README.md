@@ -35,9 +35,29 @@ cd /c/Users/adub9/spiderman-kraven-pc/tools && /c/Users/adub9/AppData/Local/Pyth
 - Program Files is write-protected. Each installer in `build_pc_zoo\` runs under UAC and keeps a backup:
   - `update_zoo.ps1`: ZOO_B/ZOO_C.pkg (old ones -> `.pkg.prev.bak`). Use this after every rebuild; the game must be closed.
   - `install_audio.ps1` / `update_audio.ps1`, `install_common.ps1`, `install_exe.ps1`.
-- **Installer for other copies of the game:** `tools\installer\build_installer.py` builds `build_pc_zoo\KravenModInstaller.exe`.
-  - It is one 132 MB file with the 70 mod files embedded, compiled with Windows' own .NET 4 `csc`.
+- **KravenModBuilder.exe, the shareable installer** (no game content, 11 MB): `tools\installer\build_installer.py` is not needed for it; `tools\installer\build_builder.py` builds `dist\KravenModBuilder.exe`.
+  - The user gives it their Windows game folder and their own Xbox disc image of Spider-Man. They can browse for each, drag them onto the window, or let it find them.
+    - Full redump images and trimmed xiso files both work (`tools\xiso.py` reads XDVDFS at offsets 0, 0x18300000, 0xFD90000 and 0x2080000).
+    - Anything else is rejected.
+  - It carries the official Python 3.12.7 embeddable package (python.org, 64-bit; its licence allows redistribution) plus the tools.
+  - It runs `tools\make_mod.py` in a temp folder, which takes about 30 s:
+    - it reads from the image only the files the mod needs;
+    - it builds the levels against that very PC copy (its own COMMON.pkg, other levels and OSCORP_B menu code, so any game build gets matching levels; for the MagiPacks copy the result was byte-identical to `build_magipacks`);
+    - it writes the sounds as 16-bit WAV, so no RAD Video Tools are needed.
+  - The install is the same code as the prebuilt installer below. For sounds it made as .wav, its GLOBAL.SND edit drops " bink" from those lines (59 lines); it switches the zoo dialogue on as .wav; it never replaces a sound the game already has.
+  - It is a window that runs as the user, because an elevated window takes no drops from Explorer. It reopens itself elevated (UAC) only when the game folder is not writable.
+  - With `/define:GUI` off it is the console program, which takes `install|uninstall "game folder" "image"`.
+  - Tested end to end on a scratch copy, and installed on the MagiPacks copy on 2026-11-06. **Not yet checked in game: WAV voice, music and dialogue.** Stock voice lines are already WAV, but all stock music is Bink.
+- **Prebuilt installer (game-derived, keep private):** `tools\installer\build_installer.py` builds `build_pc_zoo\KravenModInstaller.exe`.
+  - It is one 188 MB file with the mod files embedded, compiled with Windows' own .NET 4 `csc`.
   - The exe is game-derived: never commit or publish it.
+  - **Two game builds are supported, each with its own copy of the levels.** The levels carry their build's own menu code, taken from that build's OSCORP_B by `pc_menus.py`.
+    - `retail`: the 2002 retail exe, in Program Files. Its physics hook is at 0x4C54D9. Built into `build_pc_zoo\`.
+    - `magipacks`: the July 2003 exe, in `C:\MagiPacks\Spider-Man - The Movie`, probably patch 1.3. It changes the level scripts, including 26 pause_menu functions and 205 in the level library. Its hook is at 0x4C33F9. Built into `build_magipacks\`, by running `pc_zoo.py` with that copy's `data` folder.
+    - The installer picks the build by the MD5 of the target's `M6OSCORP\OSCORP_B.SX`, falls back to the physics-hook address, and otherwise uses `retail` with a warning.
+    - The movies, audio and tips are shared by both builds.
+    - To add a build: add a row to `VARIANTS` in `build_installer.py` and build its levels the same way.
+  - A file that is already identical to the mod's own counts as the mod's (no backup; uninstall removes it).
   - What it does (details in the header of `KravenModInstaller.cs`):
     - finds the game folder; asks for UAC;
     - copies the files;
@@ -46,7 +66,7 @@ cd /c/Users/adub9/spiderman-kraven-pc/tools && /c/Users/adub9/AppData/Local/Pyth
     - opens the game.ini level-select gate.
   - Everything is backed up to `<game>\KravenMod\backup`, and `uninstall` restores it.
   - It leaves the community fix files (Fix Enhancers' d3d8.dll, dxwrapper, Xidi) alone. It does not include the Disk 2 check change.
-  - Tested on a copy of the original files: install, reinstall, uninstall back to identical bytes, an exe already fixed, a COMMON.pkg already switched on.
+  - Tested on scratch copies of both builds. Each got its own levels, including through the exe-only fallback. Also tested: reinstall, uninstall back to identical bytes, an exe already fixed, a COMMON.pkg already switched on, and a manual install already in place. Installed on both copies on 2026-11-06; only the retail copy has been played with the mod.
 - `tools\pc_debuglog.py` runs the game under a passive debugger. It writes `build_pc_zoo\kraven_diagnostic.log` with script errors (`DEBUG ...`), crashes (EIP, stack, frames) and traced library calls.
 
 ## What was found (all verified)
