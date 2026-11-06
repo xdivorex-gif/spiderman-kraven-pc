@@ -1,0 +1,9 @@
+# game-derived build output: never commit
+build_pc_zoo/
+# third-party tools (RAD Video Tools); downloaded, never committed
+tools_ext/
+__pycache__/
+*.pyc
+*.exe
+*.dll
+*.log
